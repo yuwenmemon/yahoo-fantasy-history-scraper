@@ -1,0 +1,13 @@
+# Private Yahoo session state and exported league records.
+node_modules/
+playwright-profile/
+data/
+reports/
+
+# Local configuration and operating system files.
+.env
+.DS_Store
+npm-debug.log*
+
+# The general collector captures draft results with --include-season-pages.
+src/collect-drafts.mjs

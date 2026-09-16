@@ -1,0 +1,28 @@
+{
+  "name": "yahoo-fantasy-history-scraper",
+  "version": "0.1.0",
+  "description": "A local, browser-assisted exporter for Yahoo Fantasy Football league history.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "yahoo",
+    "fantasy-football",
+    "fantasy-sports",
+    "scraper",
+    "playwright"
+  ],
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "analyze:h2h": "node src/analyze-h2h.mjs",
+    "analyze:players": "node src/analyze-favorite-players.mjs",
+    "analyze:draft-roi": "node src/analyze-draft-roi.mjs",
+    "analyze:discoveries": "node src/analyze-player-discoveries.mjs",
+    "check": "node --check src/cli.mjs && node --check src/analyze-h2h.mjs && node --check src/analyze-favorite-players.mjs && node --check src/analyze-draft-roi.mjs && node --check src/analyze-player-discoveries.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
