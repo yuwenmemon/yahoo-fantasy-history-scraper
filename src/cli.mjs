@@ -1,4 +1,4 @@
-import {mkdir, writeFile} from 'node:fs/promises';
+import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {createInterface} from 'node:readline/promises';
 import {stdin as input, stdout as output} from 'node:process';
 import path from 'node:path';
@@ -11,8 +11,11 @@ const usage = `Usage:
 Options:
   --all-weeks                 Capture every available matchup week.
   --include-season-pages      Capture standings, teams, transactions, settings, draft results, and brackets.
+  --transactions-only         Capture transaction feeds without scoreboards or matchup details.
   --max-matchup-pages NUMBER  Stop after this many matchup detail pages per season. Default: 4.
+  --max-transaction-pages N   Stop after this many pages per transaction feed. Default: 25.
   --request-delay-ms NUMBER   Wait at least this long between Yahoo page loads. Default: 25000.
+  --resume-from FILE          Keep completed seasons from a prior snapshot and retry incomplete seasons.
   --output DIRECTORY          Write snapshots to this directory. Default: data.
   --help                      Show this message.`;
 
@@ -32,8 +35,11 @@ function getOptions(argv) {
     lastSeason: null,
     allWeeks: false,
     includeSeasonPages: false,
+    transactionsOnly: false,
     maxMatchupPages: 4,
+    maxTransactionPages: 25,
     requestDelayMs: defaultDelayMs,
+    resumeFrom: null,
     outputDirectory: path.resolve('data'),
   };
 
@@ -53,11 +59,19 @@ function getOptions(argv) {
       options.allWeeks = true;
     } else if (argument === '--include-season-pages') {
       options.includeSeasonPages = true;
+    } else if (argument === '--transactions-only') {
+      options.transactionsOnly = true;
     } else if (argument === '--max-matchup-pages' && Number.isInteger(Number(value)) && Number(value) > 0) {
       options.maxMatchupPages = Number(value);
       index += 1;
+    } else if (argument === '--max-transaction-pages' && Number.isInteger(Number(value)) && Number(value) > 0) {
+      options.maxTransactionPages = Number(value);
+      index += 1;
     } else if (argument === '--request-delay-ms' && Number.isInteger(Number(value)) && Number(value) >= 1000) {
       options.requestDelayMs = Number(value);
+      index += 1;
+    } else if (argument === '--resume-from' && value) {
+      options.resumeFrom = path.resolve(value);
       index += 1;
     } else if (argument === '--output' && value) {
       options.outputDirectory = path.resolve(value);
@@ -92,6 +106,8 @@ async function extractPage(page) {
     const links = [...document.querySelectorAll('a[href]')].map((link) => ({
       label: text(link),
       url: absoluteUrl(link.getAttribute('href')),
+      ariaLabel: link.getAttribute('aria-label') ?? '',
+      rel: link.getAttribute('rel') ?? '',
     }));
     const tables = [...document.querySelectorAll('table')].map((table, index) => ({
       index,
@@ -131,6 +147,63 @@ function matchupLinks(snapshot, week) {
     }))];
 }
 
+function canonicalLeagueUrl(snapshot, year) {
+  const pattern = new RegExp(`/(?:${year})/f1/(\\d+)(?:/|[?#]|$)`);
+  for (const {url} of snapshot.links) {
+    try {
+      const parsed = new URL(url);
+      const match = parsed.pathname.match(pattern);
+      if (match) return `${parsed.origin}/${year}/f1/${match[1]}`;
+    } catch {
+      continue;
+    }
+  }
+  return snapshot.url.replace(/[?#].*$/, '').replace(/\/$/, '');
+}
+
+const transactionFeeds = {
+  add: 'Added Players',
+  drop: 'Dropped Players',
+  trade: 'Trades',
+  waiver: 'Waiver Offers',
+};
+
+function transactionFeedUrl(snapshot, feed, fallbackUrl) {
+  const link = snapshot.links.find(({label}) => label.trim() === transactionFeeds[feed]);
+  return link?.url ?? null;
+}
+
+function transactionNextUrl(snapshot, visitedUrls) {
+  for (const link of snapshot.links) {
+    if (link.rel !== 'next' && !/^next\b/i.test(`${link.label} ${link.ariaLabel}`.trim())) continue;
+    try {
+      const url = new URL(link.url);
+      const isTransactionPage = /\/transactions(?:$|[/?#])/i.test(url.pathname) || url.searchParams.has('transactionsfilter');
+      if (!isTransactionPage || visitedUrls.has(url.href)) continue;
+      return url.href;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function snapshotSeasonYear(season) {
+  const match = String(season.pages?.home?.url ?? '').match(/\/(20\d{2})(?:\/|$)/);
+  return match ? Number(match[1]) : null;
+}
+
+function completedSnapshotSeasons(history, options) {
+  const seasons = new Map();
+  for (const season of history.seasons ?? []) {
+    const year = snapshotSeasonYear(season);
+    const failed = Boolean(season.rateLimited || season.pages?.home?.error);
+    if (!year || failed || year < options.firstSeason || year > options.lastSeason) continue;
+    seasons.set(year, season);
+  }
+  return seasons;
+}
+
 async function main() {
   const options = getOptions(process.argv.slice(2));
   log('Load Playwright.');
@@ -167,27 +240,51 @@ async function main() {
     return extractPage(page);
   };
 
-  const seasons = [];
+  const visitTransactionFeed = async (url, label) => {
+    const pages = [];
+    const visitedUrls = new Set();
+    let nextUrl = url;
+    while (nextUrl && pages.length < options.maxTransactionPages && !visitedUrls.has(nextUrl)) {
+      visitedUrls.add(nextUrl);
+      const snapshot = await visit(nextUrl, `${label}: page ${pages.length + 1}`);
+      pages.push(snapshot);
+      nextUrl = transactionNextUrl(snapshot, visitedUrls);
+    }
+    if (nextUrl) log(`${label}: reached the ${options.maxTransactionPages}-page limit.`);
+    return pages;
+  };
+
+  const resumeHistory = options.resumeFrom
+    ? JSON.parse(await readFile(options.resumeFrom, 'utf8'))
+    : null;
+  const savedSeasons = resumeHistory ? completedSnapshotSeasons(resumeHistory, options) : new Map();
+  const seasons = [...savedSeasons.values()].sort((left, right) => snapshotSeasonYear(left) - snapshotSeasonYear(right));
   await mkdir(options.outputDirectory, {recursive: true});
   for (let year = options.firstSeason; year <= options.lastSeason; year += 1) {
-    const archiveUrl = `https://football.fantasysports.yahoo.com/league/${options.leagueSlug}/${year}`;
+    if (savedSeasons.has(year)) {
+      log(`Season ${year}: already complete in ${options.resumeFrom}. Skip it.`);
+      continue;
+    }
+      const archiveUrl = `https://football.fantasysports.yahoo.com/league/${options.leagueSlug}/${year}`;
     try {
       const home = await visit(archiveUrl, `Season ${year}: load league overview`);
-      const canonicalUrl = home.url.replace(/[?#].*$/, '').replace(/\/$/, '');
+      const canonicalUrl = canonicalLeagueUrl(home, year);
+      log(`Season ${year}: use canonical season URL. ${canonicalUrl}`);
       const season = {pages: {home}, weeklyScoreboards: {}, matchups: {}, captured: [], rateLimited: false};
-      const weekNumbers = options.allWeeks
-        ? [...new Set((await page.locator('option').allTextContents())
-          .map((label) => label.match(/^\s*Week\s+(\d+)/i)?.[1])
-          .filter(Boolean)
-          .map(Number))].sort((left, right) => left - right)
-        : [1];
-      if (weekNumbers.length === 0) throw new Error('Yahoo did not show weekly matchup options.');
-      log(`Season ${year}: found ${weekNumbers.length} weekly selector options.`);
+      const weekNumbers = options.transactionsOnly
+        ? []
+        : options.allWeeks
+          ? [...new Set((await page.locator('option').allTextContents())
+            .map((label) => label.match(/^\s*Week\s+(\d+)/i)?.[1])
+            .filter(Boolean)
+            .map(Number))].sort((left, right) => left - right)
+          : [1];
+      if (!options.transactionsOnly && weekNumbers.length === 0) throw new Error('Yahoo did not show weekly matchup options.');
+      if (!options.transactionsOnly) log(`Season ${year}: found ${weekNumbers.length} weekly selector options.`);
       if (options.includeSeasonPages) {
         const pageUrls = {
           standings: `${canonicalUrl}?module=standings&lhst=stand#lhststand`,
           teams: `${canonicalUrl}/teams`,
-          transactions: `${canonicalUrl}?transactionsfilter=all&mid=1`,
           settings: `${canonicalUrl}/settings`,
           draftresults: `${canonicalUrl}/draftresults`,
           championshipBracket: `${canonicalUrl}?module=standings&lhst=playoff&ptype=champ`,
@@ -195,6 +292,22 @@ async function main() {
         };
         for (const [name, url] of Object.entries(pageUrls)) {
           season.pages[name] = await visit(url, `Season ${year}: load ${name}`);
+        }
+      }
+
+      if (options.includeSeasonPages || options.transactionsOnly) {
+        const allTransactionsUrl = `${canonicalUrl}/transactions`;
+        const transactionIndex = await visit(allTransactionsUrl, `Season ${year}: load transaction index`);
+        season.pages.transactions = transactionIndex;
+        season.transactionFeeds = {};
+        for (const feed of Object.keys(transactionFeeds)) {
+          const feedUrl = transactionFeedUrl(transactionIndex, feed, allTransactionsUrl);
+          if (!feedUrl) {
+            log(`Season ${year}: ${transactionFeeds[feed]} feed is unavailable.`);
+            season.transactionFeeds[feed] = [];
+            continue;
+          }
+          season.transactionFeeds[feed] = await visitTransactionFeed(feedUrl, `Season ${year}: ${transactionFeeds[feed].toLowerCase()}`);
         }
       }
 
@@ -225,7 +338,8 @@ async function main() {
     }
   }
 
-  const fileName = `${options.leagueSlug}-${options.firstSeason}-${options.lastSeason}-${options.allWeeks ? 'all-weeks' : 'week-1'}-matchups-1-${options.maxMatchupPages}-history.json`;
+  const captureScope = options.transactionsOnly ? 'transactions-only' : options.allWeeks ? 'all-weeks' : 'week-1';
+  const fileName = `${options.leagueSlug}-${options.firstSeason}-${options.lastSeason}-${captureScope}-matchups-1-${options.maxMatchupPages}-history.json`;
   const historyFile = path.join(options.outputDirectory, fileName);
   await writeFile(historyFile, `${JSON.stringify({sourceLeagueUrl: firstUrl, exportedAt: new Date().toISOString(), seasonCount: seasons.length, seasons}, null, 2)}\n`, {mode: 0o600});
   console.log(`Saved ${seasons.length} season snapshot(s) to ${historyFile}`);

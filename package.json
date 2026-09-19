@@ -20,7 +20,12 @@
     "analyze:players": "node src/analyze-favorite-players.mjs",
     "analyze:draft-roi": "node src/analyze-draft-roi.mjs",
     "analyze:discoveries": "node src/analyze-player-discoveries.mjs",
-    "check": "node --check src/cli.mjs && node --check src/analyze-h2h.mjs && node --check src/analyze-favorite-players.mjs && node --check src/analyze-draft-roi.mjs && node --check src/analyze-player-discoveries.mjs"
+    "analyze:nemeses": "node src/analyze-nemesis-players.mjs",
+    "analyze:lineup-regret": "node src/analyze-lineup-regret.mjs",
+    "analyze:transaction-value": "node src/analyze-transaction-value.mjs",
+    "analyze:trade-counterfactuals": "node src/analyze-trade-counterfactuals.mjs",
+    "export:transactions": "node src/export-transactions.mjs",
+    "check": "node --check src/cli.mjs && node --check src/export-transactions.mjs && node --check src/analyze-h2h.mjs && node --check src/analyze-favorite-players.mjs && node --check src/analyze-draft-roi.mjs && node --check src/analyze-player-discoveries.mjs && node --check src/analyze-nemesis-players.mjs && node --check src/analyze-lineup-regret.mjs && node --check src/analyze-transaction-value.mjs && node --check src/analyze-trade-counterfactuals.mjs"
   },
   "dependencies": {
     "playwright": "^1.63.0"

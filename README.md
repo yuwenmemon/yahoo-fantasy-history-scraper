@@ -11,11 +11,15 @@ snapshots. Nothing is sent to another service by this project.
 - League overview, weekly scoreboards, and each available matchup detail page.
 - Optional season pages: standings, teams, transactions, settings, draft
   results, championship bracket, and consolation bracket.
+- A transaction index plus paginated add, drop, trade, and waiver feeds when
+  `--include-season-pages` or `--transactions-only` is set. The index is not
+  paginated because its records overlap the category feeds.
 - Player lineups, player scores, and projections when Yahoo presents them in a
   matchup table.
 
-The included analysis commands build a head-to-head matrix, favorite-player
-tables, draft return-on-investment rankings, and player-discovery rankings from
+The included analysis commands build a head-to-head matrix, player and nemesis
+tables, draft return-on-investment rankings, player-discovery rankings,
+lineup-regret tables, transaction-value tables, and trade counterfactuals from
 the saved snapshots.
 
 ## Requirements
@@ -54,7 +58,26 @@ Yahoo limits.
 The script writes JSON snapshots to `data/` by default. Use `--output` to
 choose a different local directory.
 
+If a network change interrupts a run, use `--resume-from` with the saved
+snapshot. The scraper keeps completed seasons and starts the interrupted season
+again.
+
 Run `npm start -- --help` for the full option list.
+
+## Collect transactions only
+
+Use the same conservative delay for a transaction-only backfill. This mode
+captures the add, drop, trade, and waiver feeds without loading weekly matchup
+pages.
+
+```sh
+npm start -- \
+  --league-slug your-league-slug \
+  --first-season 2020 \
+  --last-season 2020 \
+  --transactions-only \
+  --request-delay-ms 30000
+```
 
 ## Analyze snapshots
 
@@ -74,15 +97,42 @@ npm run analyze:h2h
 npm run analyze:players
 npm run analyze:draft-roi
 npm run analyze:discoveries
+npm run analyze:nemeses
+npm run analyze:lineup-regret
+npm run analyze:transaction-value
+npm run analyze:trade-counterfactuals
 ```
 
 Each command writes an HTML report in `reports/`. The reports are local outputs
 and are intentionally ignored by Git.
 
+The transaction-value and trade-counterfactual commands also need a
+transaction-only history snapshot. Pass it explicitly, so the scripts can use
+any local league export:
+
+```sh
+npm run analyze:transaction-value -- \
+  --transaction-history data/your-league-transactions-history.json
+
+npm run analyze:trade-counterfactuals -- \
+  --transaction-history data/your-league-transactions-history.json
+```
+
 The scripts infer the current season from the newest snapshot. Use
 `--active-season YEAR` to choose a different active-manager set. Use
 `--exclude-manager "Name"` when a historical manager should not appear in an
 analysis.
+
+## Export transactions
+
+Create one deduplicated JSON file from the category feeds. The export leaves
+out the overlapping transaction-index rows.
+
+```sh
+npm run export:transactions -- \
+  --input data/your-league-2025-2025-transactions-only-matchups-1-4-history.json \
+  --output data/your-league-2025-transactions.json
+```
 
 ## Privacy and publishing
 
